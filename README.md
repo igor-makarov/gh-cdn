@@ -1,38 +1,43 @@
 # gh-cdn
 
-A Cloudflare Worker that lists a folder in a public GitHub repository using Git smart HTTP — not the GitHub API and not a `git` subprocess.
+A Cloudflare Worker that serves folders and files from public GitHub repositories using Git smart HTTP — not the GitHub API and not a `git` subprocess.
 
 ## API
 
 ```http
 GET /owner/repo/path/to/folder/
+GET /owner/repo/path/to/file.json
 ```
 
-Returns item names separated by newlines:
-
-```text
-Alpha
-Beta
-Gamma
-```
+Directories return item names separated by newlines. Files return their exact Git blob contents with a content type inferred from the extension.
 
 Examples:
 
 ```text
 /CocoaPods/Specs/Specs/0/3/5/
+/CocoaPods/Specs/Specs/2/2/2/AppNetworkManager/1.0.0/AppNetworkManager.podspec.json
 /owner/repo/                 # repository root
 ```
 
 Folder URLs are canonicalized with a trailing slash. Only public GitHub repositories are supported. The Worker resolves the repository's `HEAD` ref.
 
-Cloudflare Workers Cache sits in front of the Worker. Successful listings stay fresh for five minutes and may be served stale for up to one hour while Cloudflare refreshes them in the background; cache hits do not invoke the Worker.
+For compatibility with the CocoaPods CDN, two virtual index forms are generated directly from the Specs repository's Git trees:
+
+```text
+/CocoaPods/Specs/all_pods.txt
+/CocoaPods/Specs/all_pods_versions_2_2_2.txt
+```
+
+`all_pods.txt` batches the 1, 16, 256, and 4,096 shard-level tree fetches into four upload-pack requests. A versions index batches all pod trees in its shard. Neither operation downloads podspec blobs.
+
+Cloudflare Workers Cache sits in front of the Worker. Successful directories, files, and generated indices stay fresh for five minutes and may be served stale for up to one hour while Cloudflare refreshes them in the background; cache hits do not invoke the Worker.
 
 ## How it works
 
 1. Resolve `HEAD` with Git's smart HTTP protocol.
 2. Fetch the commit at depth 1 with `filter tree:0`.
-3. Traverse the requested folder one tree object at a time.
-4. Return names from the final tree.
+3. Traverse the requested path one tree object at a time.
+4. Return a directory listing or lazily fetch the final blob. CocoaPods virtual indices batch their tree wants by shard level.
 
 GitHub requires lazy tree backfills to include the shallow commit boundary:
 
@@ -42,7 +47,7 @@ filter tree:0
 want <tree-sha>
 ```
 
-`git-remote-ops@0.2.0` does not expose this boundary, so `patches/git-remote-ops+0.2.0.patch` adds `fetchTree(sha, { shallowCommit })`. `patch-package` reapplies it after installs.
+`git-remote-ops@0.2.0` does not expose this boundary, so `patches/git-remote-ops+0.2.0.patch` adds shallow-aware blob/tree fetches and batched `fetchTrees`. `patch-package` reapplies it after installs.
 
 ## Development
 

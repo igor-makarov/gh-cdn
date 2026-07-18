@@ -1,9 +1,32 @@
 import { RemoteGit } from "git-remote-ops";
 
 const GITHUB_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
+const COCOAPODS_VERSION_INDEX = /^all_pods_versions_([0-9a-f])_([0-9a-f])_([0-9a-f])\.txt$/;
 const TREE_MODE = "40000";
+const GITLINK_MODE = "160000";
 const CACHE_FRESH_SECONDS = 300;
 const CACHE_STALE_SECONDS = 3600;
+const CACHE_CONTROL =
+  `public, max-age=${CACHE_FRESH_SECONDS}, ` +
+  `stale-while-revalidate=${CACHE_STALE_SECONDS}`;
+
+const CONTENT_TYPES = new Map([
+  ["css", "text/css; charset=utf-8"],
+  ["gif", "image/gif"],
+  ["htm", "text/html; charset=utf-8"],
+  ["html", "text/html; charset=utf-8"],
+  ["jpeg", "image/jpeg"],
+  ["jpg", "image/jpeg"],
+  ["js", "text/javascript; charset=utf-8"],
+  ["json", "application/json; charset=utf-8"],
+  ["md", "text/markdown; charset=utf-8"],
+  ["mjs", "text/javascript; charset=utf-8"],
+  ["png", "image/png"],
+  ["svg", "image/svg+xml; charset=utf-8"],
+  ["txt", "text/plain; charset=utf-8"],
+  ["webp", "image/webp"],
+  ["xml", "application/xml; charset=utf-8"],
+]);
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -31,17 +54,11 @@ function decodeSegment(segment) {
   return decoded;
 }
 
-/** Parse /owner/repo/path/to/folder/ into a fixed GitHub remote and tree path. */
+/** Parse /owner/repo/path into a fixed GitHub remote and repository path. */
 export function parseRoute(url) {
-  if (!url.pathname.endsWith("/")) {
-    const redirect = new URL(url);
-    redirect.pathname += "/";
-    throw new HttpError(308, redirect.toString());
-  }
-
   const segments = url.pathname.split("/").filter(Boolean).map(decodeSegment);
   if (segments.length < 2) {
-    throw new HttpError(400, "Expected /owner/repo/path/to/folder/");
+    throw new HttpError(400, "Expected /owner/repo/path");
   }
   if (segments.length > 32) {
     throw new HttpError(400, "Path is too deep");
@@ -57,60 +74,165 @@ export function parseRoute(url) {
     owner,
     repo,
     path,
+    trailingSlash: url.pathname.endsWith("/"),
     remoteUrl: `https://github.com/${owner}/${repo}.git`,
   };
 }
 
-/**
- * Traverse one Git tree at a time using smart HTTP.
- *
- * /tmp is request-scoped in Workers. git-remote-ops uses it for transient
- * loose objects and packfiles; nothing persists into another request.
- */
-export async function listRemoteDirectory({ remoteUrl, path }) {
+/** Open one request-scoped smart HTTP session at the remote HEAD commit. */
+async function openRepository(remoteUrl) {
   const git = new RemoteGit(remoteUrl, { storeDir: "/tmp/gh-cdn" });
   const commitSha = unwrap(await git.resolveRef("HEAD"));
   const fetchedCommit = unwrap(await git.fetchCommit(commitSha, {
     depth: 1,
     filter: "tree:0",
   }));
+  const options = { shallowCommit: commitSha };
 
-  let treeSha = fetchedCommit.commit.tree;
-
-  for (const component of path) {
-    const entries = unwrap(await git.fetchTree(treeSha, {
-      shallowCommit: commitSha,
-    }));
-    const entry = entries.find(candidate => candidate.name === component);
-    if (!entry || entry.mode !== TREE_MODE) {
-      throw new HttpError(404, "Directory not found");
-    }
-    treeSha = entry.sha;
-  }
-
-  const entries = unwrap(await git.fetchTree(treeSha, {
-    shallowCommit: commitSha,
-  }));
-  return entries.map(entry => entry.name);
+  return {
+    rootTreeSha: fetchedCommit.commit.tree,
+    fetchTree: async sha => unwrap(await git.fetchTree(sha, options)),
+    fetchTrees: async shas => unwrap(await git.fetchTrees(shas, options)),
+    fetchBlob: async sha => unwrap(await git.fetchBlob(sha, options)),
+  };
 }
 
-function textResponse(body, status = 200, extraHeaders = {}) {
+async function findEntry(repository, path) {
+  if (path.length === 0) {
+    return { mode: TREE_MODE, name: "", sha: repository.rootTreeSha };
+  }
+
+  let treeSha = repository.rootTreeSha;
+  for (let index = 0; index < path.length; index++) {
+    const entries = await repository.fetchTree(treeSha);
+    const entry = entries.find(candidate => candidate.name === path[index]);
+    if (!entry) throw new HttpError(404, "Path not found");
+    if (index === path.length - 1) return entry;
+    if (entry.mode !== TREE_MODE) throw new HttpError(404, "Path not found");
+    treeSha = entry.sha;
+  }
+}
+
+async function findDirectorySha(repository, path) {
+  const entry = await findEntry(repository, path);
+  if (entry.mode !== TREE_MODE) throw new HttpError(404, "Directory not found");
+  return entry.sha;
+}
+
+function sorted(values) {
+  return values.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+}
+
+function treeChildren(entries) {
+  return entries.filter(entry => entry.mode === TREE_MODE);
+}
+
+/** Generate CocoaPods' complete pod-name index with one batched fetch per shard level. */
+export async function createAllPodsIndex(repository) {
+  let level = [await findDirectorySha(repository, ["Specs"])];
+
+  for (let depth = 0; depth < 4; depth++) {
+    const trees = await repository.fetchTrees(level);
+    const children = level.flatMap(sha => treeChildren(trees.get(sha) ?? []));
+    if (depth === 3) {
+      return sorted(children.map(entry => entry.name));
+    }
+    level = children.map(entry => entry.sha);
+  }
+
+  return [];
+}
+
+/** Generate one all_pods_versions_a_b_c.txt shard. */
+export async function createPodVersionsIndex(repository, prefix) {
+  const shardSha = await findDirectorySha(repository, ["Specs", ...prefix]);
+  const pods = treeChildren(await repository.fetchTree(shardSha));
+  const trees = await repository.fetchTrees(pods.map(pod => pod.sha));
+
+  return sorted(pods.map(pod => {
+    const versions = sorted(treeChildren(trees.get(pod.sha) ?? []).map(entry => entry.name));
+    return [pod.name, ...versions].join("/");
+  }));
+}
+
+function contentTypeFor(path) {
+  const name = path.at(-1) ?? "";
+  const extension = name.includes(".") ? name.split(".").at(-1).toLowerCase() : "";
+  return CONTENT_TYPES.get(extension) ?? "application/octet-stream";
+}
+
+async function readRepositoryPath(repository, path) {
+  const entry = await findEntry(repository, path);
+  if (entry.mode === TREE_MODE) {
+    const entries = await repository.fetchTree(entry.sha);
+    return { kind: "directory", names: entries.map(candidate => candidate.name) };
+  }
+  if (entry.mode === GITLINK_MODE) {
+    throw new HttpError(400, "Git submodules cannot be served as files");
+  }
+
+  return {
+    kind: "file",
+    body: await repository.fetchBlob(entry.sha),
+    contentType: contentTypeFor(path),
+  };
+}
+
+function isCocoaPodsSpecs(route) {
+  return route.owner.toLowerCase() === "cocoapods" && route.repo.toLowerCase() === "specs";
+}
+
+/** Resolve virtual CocoaPods indices or a normal repository directory/file. */
+export async function resolveRemoteRoute(route) {
+  const repository = await openRepository(route.remoteUrl);
+
+  if (isCocoaPodsSpecs(route) && route.path.length === 1) {
+    if (route.path[0] === "all_pods.txt") {
+      return { kind: "index", lines: await createAllPodsIndex(repository) };
+    }
+
+    const match = COCOAPODS_VERSION_INDEX.exec(route.path[0]);
+    if (match) {
+      return {
+        kind: "index",
+        lines: await createPodVersionsIndex(repository, match.slice(1)),
+      };
+    }
+  }
+
+  return readRepositoryPath(repository, route.path);
+}
+
+function response(body, status = 200, headers = {}) {
   return new Response(body, {
     status,
     headers: {
       "content-type": "text/plain; charset=utf-8",
       "x-content-type-options": "nosniff",
-      ...extraHeaders,
+      ...headers,
     },
   });
 }
 
+function successfulResponse(result) {
+  if (result.kind === "file") {
+    return response(result.body, 200, {
+      "cache-control": CACHE_CONTROL,
+      "content-type": result.contentType,
+    });
+  }
+
+  const lines = result.kind === "directory" ? result.names : result.lines;
+  const body = lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+  return response(body, 200, { "cache-control": CACHE_CONTROL });
+}
+
 /** Dependency injection keeps routing tests offline. */
-export function createWorker(listDirectory = listRemoteDirectory) {
+export function createWorker(resolveRoute = resolveRemoteRoute) {
   return {
     async fetch(request) {
       if (request.method !== "GET" && request.method !== "HEAD") {
-        return textResponse("Method not allowed\n", 405, { allow: "GET, HEAD" });
+        return response("Method not allowed\n", 405, { allow: "GET, HEAD" });
       }
 
       const url = new URL(request.url);
@@ -118,28 +240,32 @@ export function createWorker(listDirectory = listRemoteDirectory) {
       try {
         route = parseRoute(url);
       } catch (error) {
-        if (error instanceof HttpError && error.status === 308) {
-          return Response.redirect(error.message, 308);
-        }
         const status = error instanceof HttpError ? error.status : 400;
-        return textResponse(`${error.message}\n`, status);
+        return response(`${error.message}\n`, status);
       }
 
       try {
-        const names = await listDirectory(route);
-        const body = names.length === 0 ? "" : `${names.join("\n")}\n`;
-        const response = textResponse(body, 200, {
-          "cache-control":
-            `public, max-age=${CACHE_FRESH_SECONDS}, ` +
-            `stale-while-revalidate=${CACHE_STALE_SECONDS}`,
-        });
+        const result = await resolveRoute(route);
+        if (result.kind === "directory" && !route.trailingSlash) {
+          const redirect = new URL(url);
+          redirect.pathname += "/";
+          return Response.redirect(redirect.toString(), 308);
+        }
+        if (result.kind !== "directory" && route.trailingSlash) {
+          throw new HttpError(404, "File not found");
+        }
 
-        return request.method === "HEAD" ? new Response(null, response) : response;
+        const resolvedResponse = successfulResponse(result);
+        return request.method === "HEAD"
+          ? new Response(null, resolvedResponse)
+          : resolvedResponse;
       } catch (error) {
-        console.error(error);
+        if (!(error instanceof HttpError) || error.status >= 500) console.error(error);
         const status = error instanceof HttpError ? error.status : 502;
-        const message = status === 404 ? error.message : "Git upstream request failed";
-        return textResponse(`${message}\n`, status);
+        const message = status === 404 || status === 400
+          ? error.message
+          : "Git upstream request failed";
+        return response(`${message}\n`, status);
       }
     },
   };
