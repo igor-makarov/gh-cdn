@@ -5,6 +5,9 @@
   "compatibility_date": "2026-07-18",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "limits": {
+    "cpu_ms": 30000
+  },
   "cache": {
     "enabled": true
   },
