@@ -67,6 +67,10 @@ describe("CocoaPods indices", () => {
       rootTreeSha: "root",
       fetchTree: vi.fn(async sha => trees.get(sha) ?? []),
       fetchTrees: vi.fn(async shas => new Map(shas.map(sha => [sha, trees.get(sha) ?? []]))),
+      fetchTreeNames: vi.fn(async shas => new Map(shas.map(sha => [
+        sha,
+        (trees.get(sha) ?? []).map(entry => entry.name),
+      ]))),
     };
   }
 

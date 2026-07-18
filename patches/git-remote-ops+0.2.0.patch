@@ -1,5 +1,5 @@
 diff --git a/node_modules/git-remote-ops/dist/client.d.ts b/node_modules/git-remote-ops/dist/client.d.ts
-index 75ec5ae..12b0147 100644
+index 75ec5ae..0efd4d1 100644
 --- a/node_modules/git-remote-ops/dist/client.d.ts
 +++ b/node_modules/git-remote-ops/dist/client.d.ts
 @@ -11,7 +11,7 @@
@@ -20,24 +20,56 @@ index 75ec5ae..12b0147 100644
      /**
       * Fetch the commit at `ref` *and* its root tree from a single snapshot pack.
       *
-@@ -88,8 +88,10 @@ export declare class RemoteGit {
+@@ -88,8 +88,13 @@ export declare class RemoteGit {
          commitSha: string;
          entries: TreeEntry[];
      }, GitRemoteOpsError>>;
 -    /** Fetch and decode a single tree by sha. */
 -    fetchTree(sha: string): Promise<Result<TreeEntry[], GitRemoteOpsError>>;
++    private fetchTreeObjects;
 +    /** Fetch and decode trees by sha, optionally declaring their shallow commit boundary. */
 +    fetchTrees(shas: string[], options?: FetchTreeOptions): Promise<Result<Map<string, TreeEntry[]>, GitRemoteOpsError>>;
++    /** Fetch only tree entry names, without materializing their object IDs. */
++    fetchTreeNames(shas: string[], options?: FetchTreeOptions): Promise<Result<Map<string, string[]>, GitRemoteOpsError>>;
 +    /** Fetch and decode a single tree by sha, optionally declaring its shallow commit boundary. */
 +    fetchTree(sha: string, options?: FetchTreeOptions): Promise<Result<TreeEntry[], GitRemoteOpsError>>;
      /** Look up an already-materialized object by sha. Does not fetch on miss. */
      getObject(sha: string): Promise<GitObject | undefined>;
      private requiredObject;
 diff --git a/node_modules/git-remote-ops/dist/client.js b/node_modules/git-remote-ops/dist/client.js
-index b4f0743..04c3c31 100644
+index b4f0743..006e31f 100644
 --- a/node_modules/git-remote-ops/dist/client.js
 +++ b/node_modules/git-remote-ops/dist/client.js
-@@ -223,11 +223,12 @@ export class RemoteGit {
+@@ -35,6 +35,28 @@ const DEFAULT_CAPS = [
+     "agent=git-remote-ops/0.1",
+ ];
+ const TREE_RETAIN_TYPES = new Set(["commit", "tree"]);
++const TREE_SPACE = 0x20;
++const TREE_NUL = 0x00;
++const TREE_SHA_BYTES = 20;
++const treeDecoder = new TextDecoder();
++function parseTreeNames(content) {
++    const names = [];
++    let offset = 0;
++    while (offset < content.length) {
++        const space = content.indexOf(TREE_SPACE, offset);
++        const nul = space < 0 ? -1 : content.indexOf(TREE_NUL, space + 1);
++        if (space < 0 || nul < 0 || nul + 1 + TREE_SHA_BYTES > content.length) {
++            return fail(new ObjectDecodeError({
++                reason: "truncated-tree-entry",
++                message: "malformed tree entry",
++                objectType: "tree",
++            }));
++        }
++        names.push(treeDecoder.decode(content.subarray(space + 1, nul)));
++        offset = nul + 1 + TREE_SHA_BYTES;
++    }
++    return Result.ok(names);
++}
+ function fail(error) {
+     return Result.err(error);
+ }
+@@ -223,11 +245,12 @@ export class RemoteGit {
          return Result.ok({ commit: commit.value, sha: commitSha.value });
      }
      /** Fetch a blob by sha and return its raw contents. */
@@ -52,14 +84,13 @@ index b4f0743..04c3c31 100644
          if (fetched.isErr())
              return fail(fetched.error);
          const object = await this.requiredObject(sha);
-@@ -273,29 +274,56 @@ export class RemoteGit {
+@@ -273,29 +296,80 @@ export class RemoteGit {
              entries: entries.value,
          });
      }
 -    /** Fetch and decode a single tree by sha. */
 -    async fetchTree(sha) {
-+    /** Fetch and decode trees by sha, optionally declaring their shallow commit boundary. */
-+    async fetchTrees(shas, options = {}) {
++    async fetchTreeObjects(shas, options = {}) {
          const profile = this.profile ? Result.ok(this.profile) : await this.discover();
          if (profile.isErr())
              return fail(profile.error);
@@ -94,7 +125,7 @@ index b4f0743..04c3c31 100644
 +            durationMs: performance.now() - parseStart,
 +            byType: counts,
 +        });
-+        const trees = new Map();
++        const objects = new Map();
 +        for (const sha of uniqueShas) {
 +            const object = parsed.value.objects.get(sha);
 +            if (!object) {
@@ -108,10 +139,35 @@ index b4f0743..04c3c31 100644
 +                    sha,
 +                }));
 +            }
++            objects.set(sha, object);
++        }
++        return Result.ok(objects);
++    }
++    /** Fetch and decode trees by sha, optionally declaring their shallow commit boundary. */
++    async fetchTrees(shas, options = {}) {
++        const objects = await this.fetchTreeObjects(shas, options);
++        if (objects.isErr())
++            return fail(objects.error);
++        const trees = new Map();
++        for (const [sha, object] of objects.value) {
 +            const tree = parseTree(object.content);
 +            if (tree.isErr())
 +                return fail(tree.error);
 +            trees.set(sha, tree.value);
++        }
++        return Result.ok(trees);
++    }
++    /** Fetch only tree entry names, without materializing their object IDs. */
++    async fetchTreeNames(shas, options = {}) {
++        const objects = await this.fetchTreeObjects(shas, options);
++        if (objects.isErr())
++            return fail(objects.error);
++        const trees = new Map();
++        for (const [sha, object] of objects.value) {
++            const names = parseTreeNames(object.content);
++            if (names.isErr())
++                return fail(names.error);
++            trees.set(sha, names.value);
          }
 -        const tree = parseTree(object.value.content);
 -        if (tree.isErr())
@@ -128,7 +184,7 @@ index b4f0743..04c3c31 100644
      }
      /** Look up an already-materialized object by sha. Does not fetch on miss. */
      async getObject(sha) {
-@@ -308,12 +336,12 @@ export class RemoteGit {
+@@ -308,12 +382,12 @@ export class RemoteGit {
              return fail(object.error);
          return object;
      }
@@ -143,7 +199,7 @@ index b4f0743..04c3c31 100644
          if (pack.isErr())
              return fail(pack.error);
          const parseStart = performance.now();
-@@ -402,7 +430,7 @@ export class RemoteGit {
+@@ -402,7 +476,7 @@ export class RemoteGit {
              }
          }
      }
@@ -152,7 +208,7 @@ index b4f0743..04c3c31 100644
          const protocolVersion = this.profile?.protocolVersion ?? 0;
          const requestCaps = caps ?? buildCaps({
              shallow: depth !== undefined,
-@@ -414,6 +442,7 @@ export class RemoteGit {
+@@ -414,6 +488,7 @@ export class RemoteGit {
              depth,
              filterSpec,
              protocolVersion,
@@ -160,7 +216,7 @@ index b4f0743..04c3c31 100644
          });
          if (body.isErr())
              return fail(body.error);
-@@ -458,6 +487,12 @@ export class RemoteGit {
+@@ -458,6 +533,12 @@ export class RemoteGit {
      }
  }
  async function removeIfExists(path) {
@@ -187,6 +243,37 @@ index 4b2fd7c..69f2f96 100644
 +export type { CommitInfo, DiagnosticFn, FetchCommitOptions, FetchTreeOptions, GitObject, GitObjectMap, GitObjectType, RemoteGitOptions, ServerProfile, TreeEntry, } from "./types.js";
  //# sourceMappingURL=index.d.ts.map
 \ No newline at end of file
+diff --git a/node_modules/git-remote-ops/dist/pack/parser.js b/node_modules/git-remote-ops/dist/pack/parser.js
+index 5e53b97..c353372 100644
+--- a/node_modules/git-remote-ops/dist/pack/parser.js
++++ b/node_modules/git-remote-ops/dist/pack/parser.js
+@@ -187,6 +187,7 @@ export function parsePackfile(pack, options = {}, sink) {
+     };
+     let offset = PACK_HEADER_SIZE;
+     let pendingRefDeltas = [];
++    let remainingTargets = options.targets?.size;
+     function currentResult() {
+         return { objects: retainedBySha, stats };
+     }
+@@ -207,6 +208,9 @@ export function parsePackfile(pack, options = {}, sink) {
+             return Result.err(sha.error);
+         const object = { type, content };
+         stats.materialized++;
++        if (remainingTargets !== undefined && options.targets.has(sha.value) && !baseBySha.has(sha.value)) {
++            remainingTargets--;
++        }
+         baseBySha.set(sha.value, object);
+         baseByOffset.set(objectOffset, object);
+         if (shouldRetain(type)) {
+@@ -225,7 +229,7 @@ export function parsePackfile(pack, options = {}, sink) {
+         return Result.ok(sha.value);
+     }
+     function foundTargets() {
+-        return options.targets !== undefined && [...options.targets].every((sha) => baseBySha.has(sha));
++        return remainingTargets === 0;
+     }
+     for (let i = 0; i < count; i++) {
+         stats.scanned++;
 diff --git a/node_modules/git-remote-ops/dist/protocol/upload_pack.js b/node_modules/git-remote-ops/dist/protocol/upload_pack.js
 index 74f3b77..b621b95 100644
 --- a/node_modules/git-remote-ops/dist/protocol/upload_pack.js

@@ -93,6 +93,7 @@ async function openRepository(remoteUrl) {
     rootTreeSha: fetchedCommit.commit.tree,
     fetchTree: async sha => unwrap(await git.fetchTree(sha, options)),
     fetchTrees: async shas => unwrap(await git.fetchTrees(shas, options)),
+    fetchTreeNames: async shas => unwrap(await git.fetchTreeNames(shas, options)),
     fetchBlob: async sha => unwrap(await git.fetchBlob(sha, options)),
   };
 }
@@ -131,16 +132,14 @@ function treeChildren(entries) {
 export async function createAllPodsIndex(repository) {
   let level = [await findDirectorySha(repository, ["Specs"])];
 
-  for (let depth = 0; depth < 4; depth++) {
+  for (let depth = 0; depth < 3; depth++) {
     const trees = await repository.fetchTrees(level);
     const children = level.flatMap(sha => treeChildren(trees.get(sha) ?? []));
-    if (depth === 3) {
-      return sorted(children.map(entry => entry.name));
-    }
     level = children.map(entry => entry.sha);
   }
 
-  return [];
+  const trees = await repository.fetchTreeNames(level);
+  return sorted(level.flatMap(sha => trees.get(sha) ?? []));
 }
 
 /** Generate one all_pods_versions_a_b_c.txt shard. */
