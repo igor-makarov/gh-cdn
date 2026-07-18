@@ -1,0 +1,158 @@
+diff --git a/node_modules/git-remote-ops/dist/client.d.ts b/node_modules/git-remote-ops/dist/client.d.ts
+index 75ec5ae..2bdc29b 100644
+--- a/node_modules/git-remote-ops/dist/client.d.ts
++++ b/node_modules/git-remote-ops/dist/client.d.ts
+@@ -11,7 +11,7 @@
+ import { Result } from "better-result";
+ import type { GitRemoteOpsError } from "./errors.js";
+ import { Logger } from "./logger.js";
+-import type { CommitInfo, FetchCommitOptions, GitObject, RemoteGitOptions, ServerProfile, TreeEntry } from "./types.js";
++import type { CommitInfo, FetchCommitOptions, FetchTreeOptions, GitObject, RemoteGitOptions, ServerProfile, TreeEntry } from "./types.js";
+ /**
+  * Read-only Git remote client over smart HTTP.
+  *
+@@ -88,8 +88,8 @@ export declare class RemoteGit {
+         commitSha: string;
+         entries: TreeEntry[];
+     }, GitRemoteOpsError>>;
+-    /** Fetch and decode a single tree by sha. */
+-    fetchTree(sha: string): Promise<Result<TreeEntry[], GitRemoteOpsError>>;
++    /** Fetch and decode a single tree by sha, optionally declaring its shallow commit boundary. */
++    fetchTree(sha: string, options?: FetchTreeOptions): Promise<Result<TreeEntry[], GitRemoteOpsError>>;
+     /** Look up an already-materialized object by sha. Does not fetch on miss. */
+     getObject(sha: string): Promise<GitObject | undefined>;
+     private requiredObject;
+diff --git a/node_modules/git-remote-ops/dist/client.js b/node_modules/git-remote-ops/dist/client.js
+index b4f0743..7f560e2 100644
+--- a/node_modules/git-remote-ops/dist/client.js
++++ b/node_modules/git-remote-ops/dist/client.js
+@@ -274,11 +274,13 @@ export class RemoteGit {
+         });
+     }
+     /** Fetch and decode a single tree by sha. */
+-    async fetchTree(sha) {
++    async fetchTree(sha, options = {}) {
+         const profile = this.profile ? Result.ok(this.profile) : await this.discover();
+         if (profile.isErr())
+             return fail(profile.error);
+-        const fetched = await this.fetchObjects([sha]);
++        const shallow = options.shallowCommit ? [options.shallowCommit] : undefined;
++        const filter = options.shallowCommit ? "blob:none" : undefined;
++        const fetched = await this.fetchObjects([sha], undefined, filter, "target", shallow);
+         if (fetched.isErr())
+             return fail(fetched.error);
+         const object = await this.requiredObject(sha);
+@@ -308,12 +310,12 @@ export class RemoteGit {
+             return fail(object.error);
+         return object;
+     }
+-    async fetchObjects(wants, depth, filterSpec, parseScope = "target") {
++    async fetchObjects(wants, depth, filterSpec, parseScope = "target", shallows) {
+         const normalized = await this.normalizeWants(wants, depth, filterSpec);
+         if (normalized.length === 0)
+             return Result.ok(0);
+         this.logger.debug(`fetchObjects wants=${normalized.length} depth=${depth ?? "-"} filter=${filterSpec ?? "-"}`);
+-        const pack = await this.fetchPack(normalized, depth, filterSpec);
++        const pack = await this.fetchPack(normalized, depth, filterSpec, undefined, shallows);
+         if (pack.isErr())
+             return fail(pack.error);
+         const parseStart = performance.now();
+@@ -402,7 +404,7 @@ export class RemoteGit {
+             }
+         }
+     }
+-    async fetchPack(wants, depth, filterSpec, caps) {
++    async fetchPack(wants, depth, filterSpec, caps, shallows) {
+         const protocolVersion = this.profile?.protocolVersion ?? 0;
+         const requestCaps = caps ?? buildCaps({
+             shallow: depth !== undefined,
+@@ -414,6 +416,7 @@ export class RemoteGit {
+             depth,
+             filterSpec,
+             protocolVersion,
++            shallows,
+         });
+         if (body.isErr())
+             return fail(body.error);
+@@ -458,6 +461,12 @@ export class RemoteGit {
+     }
+ }
+ async function removeIfExists(path) {
+-    await rm(path, { force: true });
++    try {
++        await rm(path);
++    }
++    catch (cause) {
++        if (cause?.code !== "ENOENT")
++            throw cause;
++    }
+ }
+ //# sourceMappingURL=client.js.map
+\ No newline at end of file
+diff --git a/node_modules/git-remote-ops/dist/index.d.ts b/node_modules/git-remote-ops/dist/index.d.ts
+index 4b2fd7c..69f2f96 100644
+--- a/node_modules/git-remote-ops/dist/index.d.ts
++++ b/node_modules/git-remote-ops/dist/index.d.ts
+@@ -11,5 +11,5 @@ export { LooseObjectStore } from "./store.js";
+ export type { LoggerOptions, LogLevel, Metrics } from "./logger.js";
+ export { ObjectDecodeError, ObjectNotFoundError, PackParseError, PathNotFoundError, PktLineError, RefNotFoundError, TransportError, UploadPackError, } from "./errors.js";
+ export type { GitRemoteOpsError } from "./errors.js";
+-export type { CommitInfo, DiagnosticFn, FetchCommitOptions, GitObject, GitObjectMap, GitObjectType, RemoteGitOptions, ServerProfile, TreeEntry, } from "./types.js";
++export type { CommitInfo, DiagnosticFn, FetchCommitOptions, FetchTreeOptions, GitObject, GitObjectMap, GitObjectType, RemoteGitOptions, ServerProfile, TreeEntry, } from "./types.js";
+ //# sourceMappingURL=index.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/git-remote-ops/dist/protocol/upload_pack.js b/node_modules/git-remote-ops/dist/protocol/upload_pack.js
+index 74f3b77..b621b95 100644
+--- a/node_modules/git-remote-ops/dist/protocol/upload_pack.js
++++ b/node_modules/git-remote-ops/dist/protocol/upload_pack.js
+@@ -75,6 +75,12 @@ function buildV0FetchRequest(options) {
+             return Result.err(line.error);
+         lines.push(line.value);
+     }
++    for (const sha of options.shallows ?? []) {
++        const line = pktLine(encoder.encode(`shallow ${sha}\n`));
++        if (line.isErr())
++            return Result.err(line.error);
++        lines.push(line.value);
++    }
+     if (options.depth !== undefined) {
+         const line = pktLine(encoder.encode(`deepen ${options.depth}\n`));
+         if (line.isErr())
+@@ -115,6 +121,12 @@ function buildV2FetchRequest(options) {
+             return Result.err(line.error);
+         lines.push(line.value);
+     }
++    for (const sha of options.shallows ?? []) {
++        const line = pktLine(encoder.encode(`shallow ${sha}\n`));
++        if (line.isErr())
++            return Result.err(line.error);
++        lines.push(line.value);
++    }
+     for (const sha of options.wants) {
+         const line = pktLine(encoder.encode(`want ${sha}\n`));
+         if (line.isErr())
+diff --git a/node_modules/git-remote-ops/dist/types.d.ts b/node_modules/git-remote-ops/dist/types.d.ts
+index 11c5ae3..00445ee 100644
+--- a/node_modules/git-remote-ops/dist/types.d.ts
++++ b/node_modules/git-remote-ops/dist/types.d.ts
+@@ -44,6 +44,11 @@ export interface FetchCommitOptions {
+     /** Parser retention mode. `trees` keeps commits and trees while skipping blobs. */
+     parseScope?: PackParseScope;
+ }
++/** Options for fetching a tree that belongs to a shallow commit. */
++export interface FetchTreeOptions {
++    /** Commit SHA declared as shallow while backfilling the tree. */
++    shallowCommit?: string;
++}
+ /** Cached server capability profile, populated by `discover()` + `probe()`. */
+ export interface ServerProfile {
+     url: string;
+@@ -107,6 +112,8 @@ export interface FetchRequestOptions {
+     depth?: number;
+     filterSpec?: string;
+     protocolVersion?: 0 | 2;
++    /** Existing shallow boundary OIDs sent before the wants. */
++    shallows?: string[];
+ }
+ /** What the transport layer returns to the protocol layer. */
+ export interface HttpTransportResponse {

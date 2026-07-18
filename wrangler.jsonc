@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "gh-cdn",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "cache": {
+    "enabled": true
+  },
+  "observability": {
+    "enabled": true
+  }
+}
