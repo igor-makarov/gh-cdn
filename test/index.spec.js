@@ -92,8 +92,9 @@ describe("CocoaPods indices", () => {
   });
 
   it("aggregates all 16 cached first-character indices", async () => {
-    const fetcher = vi.fn(async url => {
-      const prefix = url.match(/prefix_([0-9a-f])\.txt$/)[1];
+    const fetcher = vi.fn(async request => {
+      const prefix = request.url.match(/prefix_([0-9a-f])\.txt$/)[1];
+      expect(request.headers.get("x-gh-cdn-internal")).toBe("1");
       return new Response(`${prefix}Pod\n`);
     });
 
@@ -127,7 +128,7 @@ describe("worker API", () => {
       trailingSlash: true,
       origin: "https://gh-cdn.example",
       remoteUrl: "https://github.com/example/project.git",
-    });
+    }, expect.any(Function));
   });
 
   it("redirects directory paths to their trailing-slash form", async () => {

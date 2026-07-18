@@ -187,9 +187,10 @@ function isCocoaPodsSpecs(route) {
 /** Aggregate cached first-character pod indices without sharing their CPU budget. */
 export async function fetchAllPodsIndex(origin, fetcher = fetch) {
   const bodies = await Promise.all([...COCOAPODS_SHARDS].map(async prefix => {
-    const response = await fetcher(
+    const response = await fetcher(new Request(
       `${origin}/CocoaPods/Specs/all_pods_prefix_${prefix}.txt`,
-    );
+      { headers: { "x-gh-cdn-internal": "1" } },
+    ));
     if (!response.ok) {
       response.body?.cancel();
       throw new Error(`CocoaPods prefix index failed: ${response.status}`);
@@ -201,13 +202,13 @@ export async function fetchAllPodsIndex(origin, fetcher = fetch) {
 }
 
 /** Resolve virtual CocoaPods indices or a normal repository directory/file. */
-export async function resolveRemoteRoute(route) {
+export async function resolveRemoteRoute(route, internalFetch = fetch) {
   if (
     isCocoaPodsSpecs(route) &&
     route.path.length === 1 &&
     route.path[0] === "all_pods.txt"
   ) {
-    return { kind: "index", lines: await fetchAllPodsIndex(route.origin) };
+    return { kind: "index", lines: await fetchAllPodsIndex(route.origin, internalFetch) };
   }
 
   const repository = await openRepository(route.remoteUrl);
@@ -257,7 +258,7 @@ function successfulResponse(result) {
 /** Dependency injection keeps routing tests offline. */
 export function createWorker(resolveRoute = resolveRemoteRoute) {
   return {
-    async fetch(request) {
+    async fetch(request, env, ctx) {
       if (request.method !== "GET" && request.method !== "HEAD") {
         return response("Method not allowed\n", 405, { allow: "GET, HEAD" });
       }
@@ -272,7 +273,10 @@ export function createWorker(resolveRoute = resolveRemoteRoute) {
       }
 
       try {
-        const result = await resolveRoute(route);
+        const internalFetch = ctx?.exports?.default?.fetch
+          ? internalRequest => ctx.exports.default.fetch(internalRequest)
+          : fetch;
+        const result = await resolveRoute(route, internalFetch);
         if (result.kind === "directory" && !route.trailingSlash) {
           const redirect = new URL(url);
           redirect.pathname += "/";

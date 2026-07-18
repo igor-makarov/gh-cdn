@@ -28,7 +28,7 @@ For compatibility with the CocoaPods CDN, two virtual index forms are generated 
 /CocoaPods/Specs/all_pods_versions_2_2_2.txt
 ```
 
-`all_pods.txt` concurrently aggregates 16 cached first-character shard indices so each shard gets its own Worker CPU budget. Within a shard, tree wants are batched by level. A versions index similarly batches all pod trees in its three-character shard. None of these operations downloads podspec blobs.
+`all_pods.txt` concurrently aggregates 16 first-character shard indices through `ctx.exports.default`, Cloudflare's loopback service binding. Each shard is a separate Worker invocation with its own CPU budget. Within a shard, tree wants are batched by level. A versions index similarly batches all pod trees in its three-character shard. None of these operations downloads podspec blobs.
 
 Cloudflare Workers Cache sits in front of the Worker. Successful directories, files, and generated indices stay fresh for five minutes and may be served stale for up to one hour while Cloudflare refreshes them in the background; cache hits do not invoke the Worker.
 
