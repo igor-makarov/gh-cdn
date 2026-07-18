@@ -186,13 +186,17 @@ function isCocoaPodsSpecs(route) {
 
 /** Aggregate cached first-character pod indices without sharing their CPU budget. */
 export async function fetchAllPodsIndex(origin, fetcher = fetch) {
-  const responses = await Promise.all([...COCOAPODS_SHARDS].map(prefix =>
-    fetcher(`${origin}/CocoaPods/Specs/all_pods_prefix_${prefix}.txt`),
-  ));
-  const failed = responses.find(response => !response.ok);
-  if (failed) throw new Error(`CocoaPods prefix index failed: ${failed.status}`);
+  const bodies = await Promise.all([...COCOAPODS_SHARDS].map(async prefix => {
+    const response = await fetcher(
+      `${origin}/CocoaPods/Specs/all_pods_prefix_${prefix}.txt`,
+    );
+    if (!response.ok) {
+      response.body?.cancel();
+      throw new Error(`CocoaPods prefix index failed: ${response.status}`);
+    }
+    return response.text();
+  }));
 
-  const bodies = await Promise.all(responses.map(response => response.text()));
   return sorted(bodies.flatMap(body => body.split("\n").filter(Boolean)));
 }
 
