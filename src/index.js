@@ -2,6 +2,8 @@ import { RemoteGit } from "git-remote-ops";
 
 const GITHUB_NAME = /^[A-Za-z0-9_.-]{1,100}$/;
 const COCOAPODS_VERSION_INDEX = /^all_pods_versions_([0-9a-f])_([0-9a-f])_([0-9a-f])\.txt$/;
+const COCOAPODS_POD_PREFIX_INDEX = /^all_pods_prefix_([0-9a-f])\.txt$/;
+const COCOAPODS_SHARDS = "0123456789abcdef";
 const TREE_MODE = "40000";
 const GITLINK_MODE = "160000";
 const CACHE_FRESH_SECONDS = 300;
@@ -75,6 +77,7 @@ export function parseRoute(url) {
     repo,
     path,
     trailingSlash: url.pathname.endsWith("/"),
+    origin: url.origin,
     remoteUrl: `https://github.com/${owner}/${repo}.git`,
   };
 }
@@ -129,10 +132,10 @@ function treeChildren(entries) {
 }
 
 /** Generate CocoaPods' complete pod-name index with one batched fetch per shard level. */
-export async function createAllPodsIndex(repository) {
-  let level = [await findDirectorySha(repository, ["Specs"])];
+export async function createAllPodsIndex(repository, prefix = []) {
+  let level = [await findDirectorySha(repository, ["Specs", ...prefix])];
 
-  for (let depth = 0; depth < 3; depth++) {
+  for (let depth = prefix.length; depth < 3; depth++) {
     const trees = await repository.fetchTrees(level);
     const children = level.flatMap(sha => treeChildren(trees.get(sha) ?? []));
     level = children.map(entry => entry.sha);
@@ -181,20 +184,41 @@ function isCocoaPodsSpecs(route) {
   return route.owner.toLowerCase() === "cocoapods" && route.repo.toLowerCase() === "specs";
 }
 
+/** Aggregate cached first-character pod indices without sharing their CPU budget. */
+export async function fetchAllPodsIndex(origin, fetcher = fetch) {
+  const responses = await Promise.all([...COCOAPODS_SHARDS].map(prefix =>
+    fetcher(`${origin}/CocoaPods/Specs/all_pods_prefix_${prefix}.txt`),
+  ));
+  const failed = responses.find(response => !response.ok);
+  if (failed) throw new Error(`CocoaPods prefix index failed: ${failed.status}`);
+
+  const bodies = await Promise.all(responses.map(response => response.text()));
+  return sorted(bodies.flatMap(body => body.split("\n").filter(Boolean)));
+}
+
 /** Resolve virtual CocoaPods indices or a normal repository directory/file. */
 export async function resolveRemoteRoute(route) {
+  if (
+    isCocoaPodsSpecs(route) &&
+    route.path.length === 1 &&
+    route.path[0] === "all_pods.txt"
+  ) {
+    return { kind: "index", lines: await fetchAllPodsIndex(route.origin) };
+  }
+
   const repository = await openRepository(route.remoteUrl);
 
   if (isCocoaPodsSpecs(route) && route.path.length === 1) {
-    if (route.path[0] === "all_pods.txt") {
-      return { kind: "index", lines: await createAllPodsIndex(repository) };
+    const prefixMatch = COCOAPODS_POD_PREFIX_INDEX.exec(route.path[0]);
+    if (prefixMatch) {
+      return { kind: "index", lines: await createAllPodsIndex(repository, prefixMatch.slice(1)) };
     }
 
-    const match = COCOAPODS_VERSION_INDEX.exec(route.path[0]);
-    if (match) {
+    const versionMatch = COCOAPODS_VERSION_INDEX.exec(route.path[0]);
+    if (versionMatch) {
       return {
         kind: "index",
-        lines: await createPodVersionsIndex(repository, match.slice(1)),
+        lines: await createPodVersionsIndex(repository, versionMatch.slice(1)),
       };
     }
   }

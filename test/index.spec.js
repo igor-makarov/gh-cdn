@@ -7,6 +7,7 @@ import {
   createAllPodsIndex,
   createPodVersionsIndex,
   createWorker,
+  fetchAllPodsIndex,
   HttpError,
   parseRoute,
 } from "../src/index.js";
@@ -35,6 +36,7 @@ describe("parseRoute", () => {
       repo: "Specs",
       path: ["Specs", "0", "3", "5"],
       trailingSlash: true,
+      origin: "https://example.com",
       remoteUrl: "https://github.com/CocoaPods/Specs.git",
     });
   });
@@ -88,6 +90,20 @@ describe("CocoaPods indices", () => {
         "ZuluPod/1.0.0/2.0.0",
       ]);
   });
+
+  it("aggregates all 16 cached first-character indices", async () => {
+    const fetcher = vi.fn(async url => {
+      const prefix = url.match(/prefix_([0-9a-f])\.txt$/)[1];
+      return new Response(`${prefix}Pod\n`);
+    });
+
+    const names = await fetchAllPodsIndex("https://gh-cdn.example", fetcher);
+
+    expect(fetcher).toHaveBeenCalledTimes(16);
+    expect(names).toHaveLength(16);
+    expect(names[0]).toBe("0Pod");
+    expect(names.at(-1)).toBe("fPod");
+  });
 });
 
 describe("worker API", () => {
@@ -109,6 +125,7 @@ describe("worker API", () => {
       repo: "project",
       path: ["some", "folder"],
       trailingSlash: true,
+      origin: "https://gh-cdn.example",
       remoteUrl: "https://github.com/example/project.git",
     });
   });
