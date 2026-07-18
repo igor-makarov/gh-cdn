@@ -34,7 +34,7 @@ index 75ec5ae..12b0147 100644
      getObject(sha: string): Promise<GitObject | undefined>;
      private requiredObject;
 diff --git a/node_modules/git-remote-ops/dist/client.js b/node_modules/git-remote-ops/dist/client.js
-index b4f0743..7179727 100644
+index b4f0743..04c3c31 100644
 --- a/node_modules/git-remote-ops/dist/client.js
 +++ b/node_modules/git-remote-ops/dist/client.js
 @@ -223,11 +223,12 @@ export class RemoteGit {
@@ -52,7 +52,7 @@ index b4f0743..7179727 100644
          if (fetched.isErr())
              return fail(fetched.error);
          const object = await this.requiredObject(sha);
-@@ -273,29 +274,43 @@ export class RemoteGit {
+@@ -273,29 +274,56 @@ export class RemoteGit {
              entries: entries.value,
          });
      }
@@ -64,12 +64,8 @@ index b4f0743..7179727 100644
          if (profile.isErr())
              return fail(profile.error);
 -        const fetched = await this.fetchObjects([sha]);
-+        const uniqueShas = [...new Set(shas)];
-+        const shallow = options.shallowCommit ? [options.shallowCommit] : undefined;
-+        const filter = options.shallowCommit ? "tree:0" : undefined;
-+        const fetched = await this.fetchObjects(uniqueShas, undefined, filter, "target", shallow);
-         if (fetched.isErr())
-             return fail(fetched.error);
+-        if (fetched.isErr())
+-            return fail(fetched.error);
 -        const object = await this.requiredObject(sha);
 -        if (object.isErr())
 -            return fail(object.error);
@@ -80,20 +76,39 @@ index b4f0743..7179727 100644
 -                objectType: object.value.type,
 -                sha,
 -            }));
++        const uniqueShas = [...new Set(shas)];
++        if (uniqueShas.length === 0)
++            return Result.ok(new Map());
++        const shallow = options.shallowCommit ? [options.shallowCommit] : undefined;
++        const filter = options.shallowCommit ? "tree:0" : undefined;
++        const pack = await this.fetchPack(uniqueShas, undefined, filter, undefined, shallow);
++        if (pack.isErr())
++            return fail(pack.error);
++        const parseStart = performance.now();
++        const parsed = await this.parsePackFile(pack.value, { targets: new Set(uniqueShas) });
++        if (parsed.isErr())
++            return fail(parsed.error);
++        const counts = parsed.value.stats.byType;
++        this.packLogger.recordPack({
++            bytes: pack.value.length,
++            durationMs: performance.now() - parseStart,
++            byType: counts,
++        });
 +        const trees = new Map();
 +        for (const sha of uniqueShas) {
-+            const object = await this.requiredObject(sha);
-+            if (object.isErr())
-+                return fail(object.error);
-+            if (object.value.type !== "tree") {
++            const object = parsed.value.objects.get(sha);
++            if (!object) {
++                return fail(new ObjectNotFoundError({ sha, message: `object not found: ${sha}` }));
++            }
++            if (object.type !== "tree") {
 +                return fail(new ObjectDecodeError({
 +                    reason: "unexpected-object-type",
 +                    message: `object is not a tree: ${sha}`,
-+                    objectType: object.value.type,
++                    objectType: object.type,
 +                    sha,
 +                }));
 +            }
-+            const tree = parseTree(object.value.content);
++            const tree = parseTree(object.content);
 +            if (tree.isErr())
 +                return fail(tree.error);
 +            trees.set(sha, tree.value);
@@ -113,7 +128,7 @@ index b4f0743..7179727 100644
      }
      /** Look up an already-materialized object by sha. Does not fetch on miss. */
      async getObject(sha) {
-@@ -308,12 +323,12 @@ export class RemoteGit {
+@@ -308,12 +336,12 @@ export class RemoteGit {
              return fail(object.error);
          return object;
      }
@@ -128,7 +143,7 @@ index b4f0743..7179727 100644
          if (pack.isErr())
              return fail(pack.error);
          const parseStart = performance.now();
-@@ -402,7 +417,7 @@ export class RemoteGit {
+@@ -402,7 +430,7 @@ export class RemoteGit {
              }
          }
      }
@@ -137,7 +152,7 @@ index b4f0743..7179727 100644
          const protocolVersion = this.profile?.protocolVersion ?? 0;
          const requestCaps = caps ?? buildCaps({
              shallow: depth !== undefined,
-@@ -414,6 +429,7 @@ export class RemoteGit {
+@@ -414,6 +442,7 @@ export class RemoteGit {
              depth,
              filterSpec,
              protocolVersion,
@@ -145,7 +160,7 @@ index b4f0743..7179727 100644
          });
          if (body.isErr())
              return fail(body.error);
-@@ -458,6 +474,12 @@ export class RemoteGit {
+@@ -458,6 +487,12 @@ export class RemoteGit {
      }
  }
  async function removeIfExists(path) {
