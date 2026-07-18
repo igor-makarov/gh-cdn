@@ -37,7 +37,7 @@ index b4f0743..7f560e2 100644
              return fail(profile.error);
 -        const fetched = await this.fetchObjects([sha]);
 +        const shallow = options.shallowCommit ? [options.shallowCommit] : undefined;
-+        const filter = options.shallowCommit ? "blob:none" : undefined;
++        const filter = options.shallowCommit ? "tree:0" : undefined;
 +        const fetched = await this.fetchObjects([sha], undefined, filter, "target", shallow);
          if (fetched.isErr())
              return fail(fetched.error);

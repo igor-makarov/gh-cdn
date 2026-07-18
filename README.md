@@ -38,7 +38,7 @@ GitHub requires lazy tree backfills to include the shallow commit boundary:
 
 ```text
 shallow <commit-sha>
-filter blob:none
+filter tree:0
 want <tree-sha>
 ```
 
@@ -65,4 +65,4 @@ Wrangler enables `nodejs_compat` with compatibility date `2026-07-18`, giving `g
 
 ## Runtime limits
 
-`/tmp` is memory-backed and request-scoped. Large repositories can require large packfiles while resolving high-level trees. Cloudflare limits individual VFS files to 128 MB, and all VFS data counts toward Worker memory. CocoaPods/Specs currently produces an approximately 81 MB root-tree upload-pack response, so it fits the per-file limit but is close enough to memory limits to warrant production testing.
+`/tmp` is memory-backed and request-scoped. Cloudflare limits individual VFS files to 128 MB, and all VFS data counts toward Worker memory. Lazy tree fetches use `filter tree:0`, so GitHub returns only the explicitly requested tree rather than its full descendant tree graph. For example, a CocoaPods/Specs traversal that otherwise produces an approximately 81 MB root-tree pack transfers only a few kilobytes of pack data.
